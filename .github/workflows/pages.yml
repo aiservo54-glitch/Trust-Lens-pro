@@ -1,0 +1,30 @@
+name: Deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.d.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          Z=$(find . -name 'trust-auto-scan*.zip' | head -n1)
+          test -n "$Z" || { echo "ZIP NOT FOUND"; ls -R; exit 1; }
+          unzip -q "$Z" -d tmp
+          mkdir site
+          cp -r tmp/*/. site/
+          ls site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: d
+        uses: actions/deploy-pages@v4
