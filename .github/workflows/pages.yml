@@ -1,12 +1,19 @@
 name: Deploy
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
 permissions:
   contents: read
   pages: write
   id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -14,17 +21,55 @@ jobs:
       name: github-pages
       url: ${{ steps.d.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - run: |
-          Z=$(find . -name 'trust-auto-scan*.zip' | head -n1)
-          test -n "$Z" || { echo "ZIP NOT FOUND"; ls -R; exit 1; }
-          unzip -q "$Z" -d tmp
-          mkdir site
-          cp -r tmp/*/. site/
-          ls site
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Assemble site (repo root, or newest ZIP that contains index.html)
+        run: |
+          set -euo pipefail
+          rm -rf _src site; mkdir -p _src site
+          if [ -f index.html ]; then
+            echo "Mode: repository root"
+            SRC=.
+          else
+            best=""; bestct=0
+            while IFS= read -r -d '' z; do
+              listing=$(unzip -Z1 "$z" 2>/dev/null || true)
+              if grep -q 'index\.html$' <<< "$listing"; then
+                ct=$(git log -1 --format=%ct -- "$z" 2>/dev/null || true); ct=${ct:-0}
+                echo "candidate: $z (last commit time $ct)"
+                if [ "$ct" -ge "$bestct" ]; then best="$z"; bestct=$ct; fi
+              fi
+            done < <(find . -type f -iname '*.zip' -not -path './.git/*' -not -path './node_modules/*' -print0)
+            if [ -z "$best" ]; then
+              echo "::error::No index.html at repo root and no ZIP containing index.html was found"; ls -la; exit 1
+            fi
+            echo "Using ZIP: $best"
+            unzip -q "$best" -d _src
+            idx=$(find _src -name index.html -not -path '*/www/*' -not -path '*/node_modules/*' | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
+            SRC=$(dirname "$idx")
+            echo "Site root inside ZIP: $SRC"
+          fi
+          tar -C "$SRC" --exclude=./.git --exclude=./.github --exclude=./_src --exclude=./site --exclude=./node_modules --exclude='./*.zip' -cf - . | tar -C site -xf -
+          python3 - <<'PY'
+          import re, os, sys
+          h = open('site/index.html', encoding='utf8').read()
+          miss = [u for u in re.findall(r'(?:src|href)="([^"#?]+)"', h)
+                  if not re.match(r'(https?:|data:|mailto:)', u) and not os.path.exists('site/' + u)]
+          for m in miss:
+              print(f"::error::index.html references a missing file: {m}")
+          if miss:
+              sys.exit(1)
+          print("index.html references OK")
+          PY
+          echo "Files in site:"; find site -type f | sort | head -40
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
+
       - id: d
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
